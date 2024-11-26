@@ -1,5 +1,5 @@
 #!/bin/env python3
-import json
+
 # MIT License
 #
 # Copyright (c) 2018-2019 Red Hat, Inc.
@@ -49,7 +49,7 @@ logging.basicConfig(format="%(levelname)s:%(message)s", level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 
-class ContainerImage(object):
+class S2IContainerImage(object):
     def __init__(self, image_name: str):
         self.image_name: str = image_name
         self.container_args: str = ""
@@ -63,10 +63,7 @@ class ContainerImage(object):
             f"run --rm {self.image_name} bash -c /usr/libexec/s2i/usage"
         )
 
-    def podman_run_cmd(self, cmd: str):
-        cmd_with_podman = cmd.replace("podman", "").replace("docker", "")
-        return PodmanCLIWrapper.run_docker_command(cmd=cmd_with_podman)
-
+    # Replacement for
     def is_image_available(self):
         return PodmanCLIWrapper.run_docker_command(f"inspect {self.image_name}")
 
@@ -79,7 +76,7 @@ class ContainerImage(object):
         return PodmanCLIWrapper.run_docker_command(f"ps -q -a -f 'id={id_hash}'")
 
     # Replacement for ct_s2i_build_as_df
-    def s2i_build_as_df(self, app_path: str, s2i_args: str, src_image: str, dst_image: str):
+    def s2i_build_as_df(self, app_path: str, src_image: str, dst_image: str, s2i_args: str = "--pull-policy=never"):
         named_tmp_dir = mkdtemp()
         tmp_dir = Path(named_tmp_dir)
         if tmp_dir.exists():
@@ -102,7 +99,7 @@ class ContainerImage(object):
         PodmanCLIWrapper.run_docker_command(
             f"build {mount_options} -f {df_name} --no-cache=true -t {dst_image}"
         )
-        return ContainerImage(image_name=dst_image)
+        return S2IContainerImage(image_name=dst_image)
 
     # Replacement for ct_s2i_build_as_df_build_args
     def s2i_create_df(
@@ -217,74 +214,17 @@ class ContainerImage(object):
     def scl_usage_old(self):
         pass
 
-    def test_response(
-            self, url: str = "",
-            expected_code: int = 200, port: int = 8080,
-            expected_output: str = "", max_tests: int = 20
-    ) -> bool:
-        url = f"{url}:{port}"
-        print(f"URL address to get response from container: {url}")
-        cmd_to_run = "curl --connect-timeout 10 -k -s -w '%{http_code}' " + f"{url}"
-        # Check if application returns proper HTTP_CODE
-        print("Check if HTTP_CODE is valid.")
-        for count in range(max_tests):
-            try:
-                output_code = run_command(cmd=f"{cmd_to_run}", return_output=True)
-                return_code = output_code[-3:]
-                print(f"Output is: {output_code} and Return Code is: {return_code}")
-                try:
-                    int_ret_code = int(return_code)
-                    if int_ret_code == expected_code:
-                        print(f"HTTP_CODE is VALID {int_ret_code}")
-                        break
-                except ValueError:
-                    logger.info(return_code)
-                    time.sleep(1)
-                    continue
-                time.sleep(3)
-                continue
-            except subprocess.CalledProcessError as cpe:
-                print(f"Error from {cmd_to_run} is {cpe.stderr}, {cpe.stdout}")
-                time.sleep(3)
-
-        cmd_to_run = "curl --connect-timeout 10 -k -s " + f"{url}"
-        # Check if application returns proper output
-        for count in range(max_tests):
-            output_code = run_command(cmd=f"{cmd_to_run}", return_output=True)
-            print(f"Check if expected output {expected_output} is in {cmd_to_run}.")
-            if expected_output in output_code:
-                print(f"Expected output '{expected_output}' is present.")
-                return True
-            print(
-                f"check_response_inside_cluster:"
-                f"expected_output {expected_output} not found in output of {cmd_to_run} command. See {output_code}"
-            )
-            time.sleep(5)
-        return False
-
     # Replacement for ct_create_container
-    def create_container(self, cid_file: str, container_args: str = "") -> bool:
+    def create_container(self, cid_file: str, container_args: str = "", *args):
         self.cid_file_dir = Path(mkdtemp(suffix=".test_cid_files"))
         p = Path(self.cid_file_dir)
         self.cid_file = p / cid_file
-
-        print(f"The CID file {self.cid_file}")
-        args_to_run = ""
-        if container_args != "":
-            args_to_run = container_args
-        if container_args != "":
-            cmd = f"run --cidfile={self.cid_file} -d {args_to_run} {self.image_name}"
-        else:
-            cmd = f"run --cidfile={self.cid_file} -d {self.image_name}"
-        try:
-            PodmanCLIWrapper.run_docker_command(cmd=cmd)
-        except subprocess.CalledProcessError as cpe:
-            print(f"The command '{cmd}' failed with {cpe.output} and error: {cpe.stderr}")
-            return False
+        PodmanCLIWrapper.run_docker_command(
+            f"run --cidfile={self.cid_file} -d {container_args} {self.image_name} {args}"
+        )
         if not self.wait_for_cid():
             return False
-        print(f"Created container {self.get_cid_file()}")
-        return True
+        logger.info(f"Created container {self.get_cid_file()}")
 
     # Replacement for ct_wait_for_cid
     def wait_for_cid(self):
@@ -293,10 +233,10 @@ class ContainerImage(object):
         while attempt < max_attempts:
             if self.cid_file.exists():
                 with open(self.cid_file) as f:
-                    print(f"{self.cid_file} contains:")
-                    print(f.readlines())
+                    logger.debug(f"{self.cid_file} contains:")
+                    logger.info(f.readlines())
                 return True
-            print("Waiting for container to start.")
+            logger.info("Waiting for container to start.")
             attempt += 1
             time.sleep(1)
         return False
@@ -304,16 +244,9 @@ class ContainerImage(object):
     # Replacement for get_cip
     def get_cip(self):
         container_id = self.get_cid_file()
-        logger.info(f"Container id file is: {container_id}")
-        output = PodmanCLIWrapper.run_docker_command(
-            f"inspect {container_id}"
+        return PodmanCLIWrapper.run_docker_command(
+            f"inspect --format='{{.NetworkSettings.IPAddress}}' {container_id}"
         )
-        json_output = json.loads(output)
-        if len(json_output) == 0:
-            return None
-        if "NetworkSettings" not in json_output[0]:
-            return None
-        return json_output[0]["NetworkSettings"]["IPAddress"]
 
     def check_envs_set(self):
         pass
@@ -502,6 +435,9 @@ RUN which {binary} | grep {binary_path}
     # done
     # : "  Success!"
     # }
+
+    def test_response(self):
+        pass
 
     # Replacement for ct_check_exec_env_vars
     def test_check_exec_env_vars(self, env_filter: str = "^X_SCLS=|/opt/rh|/opt/app-root"):
